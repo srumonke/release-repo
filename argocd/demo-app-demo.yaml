@@ -1,0 +1,37 @@
+# ArgoCD Application for the Harness GitOps demo.
+# Managed by the account-level Harness GitOps agent "argoagentdemo" running in namespace harness-sruthi.
+#
+# Best practices demonstrated here:
+#   - App-of-apps-ready layout (one Application per environment under argocd/)
+#   - destination.namespace controls the target namespace (manifests stay namespace-agnostic)
+#   - Automated sync with self-heal + prune for true GitOps reconciliation
+#   - Retry/backoff on sync so transient cluster pressure doesn't wedge the app
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-demo
+  namespace: harness-sruthi
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/srumonke/release-repo
+    targetRevision: main
+    path: demo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harness-sruthi
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=false
+    - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

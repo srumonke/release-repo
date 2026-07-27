@@ -1,0 +1,28 @@
+# Reference ArgoCD Application for the prod environment.
+# Prod uses manual sync (no automated block) so promotions are deliberate/approved.
+# Flip to an automated policy once you're comfortable with hands-off prod reconciliation.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-prod
+  namespace: harness-sruthi
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/srumonke/release-repo
+    targetRevision: main
+    path: prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    syncOptions:
+    - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
