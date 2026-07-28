@@ -23,14 +23,14 @@ spec:
         image: kennethreitz/httpbin:latest
         imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 8080
+        - containerPort: 80
           name: http
           protocol: TCP
         # httpbin serves on 80; map the probe there. Swap path to /health for the real demo-app image.
         livenessProbe:
           httpGet:
             path: /status/200
-            port: 8080
+            port: 80
           initialDelaySeconds: 15
           periodSeconds: 10
           timeoutSeconds: 5
@@ -38,7 +38,7 @@ spec:
         readinessProbe:
           httpGet:
             path: /status/200
-            port: 8080
+            port: 80
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
@@ -50,6 +50,3 @@ spec:
           limits:
             memory: "128Mi"
             cpu: "200m"
-        env:
-        - name: GUNICORN_CMD_ARGS
-          value: "--bind=0.0.0.0:8080"
