@@ -1,105 +1,82 @@
-# Release Repository - Kubernetes Manifests
+# release-repo — GitOps manifests for `service-a`
 
-ArgoCD GitOps repository containing Kubernetes manifests for the demo-app across environments.
+Kubernetes manifests for the `service-a` demo app, deployed by **Harness GitOps (ArgoCD)**.
+This is the **source of truth for what runs in each cluster**: nothing is `kubectl apply`-ed by
+hand — a change is deployed by committing to this repo and letting ArgoCD reconcile it.
+
+Paired with the application source in
+[`application-repo`](https://github.com/srumonke/application-repo).
 
 ## Structure
 
 ```
 release-repo/
-├── argocd/       # ArgoCD Application manifests (one per environment)
-├── demo/         # Self-contained demo env — deployed to the harness-sruthi namespace
-├── dev/          # Development environment (1 replica, minimal resources)
-├── staging/      # Staging environment (2 replicas, moderate resources)
-└── prod/         # Production environment (3 replicas, high resources, rolling updates)
+├── argocd/                    # ArgoCD Application definitions (reference copies)
+│   ├── demo-app-dev.yaml      # watches dev/,  auto-sync (prune + selfHeal)
+│   └── demo-app-prod.yaml     # watches prod/, MANUAL sync (pipeline-driven)
+├── dev/                       # Dev environment
+│   ├── deployment.yaml        # 1 replica, small resources
+│   └── service.yaml           # ClusterIP :80 → :8080
+└── prod/                      # Prod environment
+    ├── deployment.yaml        # 3 replicas, RollingUpdate (zero-downtime)
+    └── service.yaml           # ClusterIP :80 → :8080
 ```
 
-## GitOps topology
+## How deployment works (GitOps)
 
-- **GitOps agent**: account-level Harness GitOps agent `argoagentdemo`, running in the
-  `harness-sruthi` namespace of the `ise-lab` EKS cluster.
-- **Applications**: defined in `argocd/`. Each `Application` points at one env directory and
-  syncs it to a target namespace. `destination.namespace` (not a hardcoded `metadata.namespace`
-  in the manifests) controls placement — the manifests stay namespace-agnostic.
-- **Sync policy**: dev/staging/demo are fully automated (`prune: true`, `selfHeal: true`);
-  prod is manual-sync so promotions are deliberate.
-- The `demo/` app is the one wired up live in this environment (namespace `harness-sruthi`)
-  and uses a public image so it runs without any private registry credentials.
+```
+edit deployment.yaml image tag  →  git commit  →  ArgoCD detects  →  cluster matches Git
+   (declares desired state)        (the deploy)     (reconcile)        (running state)
+```
 
-Apply the Applications through the Harness GitOps agent (recommended) or directly:
+Each ArgoCD `Application` in `argocd/` points at one env directory and syncs it to a namespace:
+
+| App | Path | Namespace | Sync policy |
+|-----|------|-----------|-------------|
+| `demo-app-dev`  | `dev/`  | `dev`  | Automated (`prune` + `selfHeal`) |
+| `demo-app-prod` | `prod/` | `prod` | **Manual** — promotions go through the Harness CD pipeline |
+
+Dev auto-syncs on every commit. **Prod is deliberately manual** so a promotion is an explicit,
+approved, audited action driven by the `service-a-hotfix-cd` pipeline (see application-repo), not a
+silent reaction to a commit.
+
+## Environment differences
+
+| Config | Dev | Prod |
+|--------|-----|------|
+| Replicas | 1 | 3 |
+| Strategy | RollingUpdate (default) | RollingUpdate `maxSurge:1, maxUnavailable:0` |
+| Memory request / limit | 256Mi / 512Mi | 256Mi / 1Gi* |
+| CPU request / limit | 250m / 500m | 150m / 1000m* |
+| Spring profile | `dev` | `prod` (+ `JAVA_OPTS` tuning) |
+
+\* Prod resource *requests* are trimmed for a local `kind` cluster. A real prod would request
+~1Gi / 1000m per replica.
+
+## Deploying a new version
+
+**Manual (dev):** bump the image tag and commit — ArgoCD auto-syncs.
 
 ```bash
-kubectl apply -f argocd/demo-app-demo.yaml
+# edit dev/deployment.yaml → image: ghcr.io/srumonke/service-a:<new-tag>
+git commit -am "Deploy service-a <new-tag> to dev" && git push
 ```
 
-Each environment contains:
-- `deployment.yaml` - Kubernetes Deployment manifest
-- `service.yaml` - Kubernetes Service manifest
-- `values.yaml` - Environment-specific configuration values
+**Prod:** run the `service-a-hotfix-cd` pipeline. Its **Update Release Repo** step opens a PR
+bumping `prod/deployment.yaml`, **Merge PR** merges it, and **GitOps Sync** rolls prod — after the
+approval gate. See [application-repo](https://github.com/srumonke/application-repo) for the pipeline.
 
-## Environment Differences
+## Health checks
 
-| Config | Dev | Staging | Prod |
-|--------|-----|---------|------|
-| Replicas | 1 | 2 | 3 |
-| Memory Request | 256Mi | 512Mi | 1Gi |
-| Memory Limit | 512Mi | 1Gi | 2Gi |
-| CPU Request | 250m | 500m | 1000m |
-| CPU Limit | 500m | 1000m | 2000m |
-| Image Pull Policy | Always | Always | IfNotPresent |
-| Liveness Initial Delay | 30s | 30s | 60s |
-| Readiness Initial Delay | 10s | 10s | 20s |
-| Deployment Strategy | - | - | RollingUpdate (maxSurge:1, maxUnavailable:0) |
+Both environments probe `GET /health` (returns `{"status":"UP"}`) for liveness and readiness.
+Services are `ClusterIP`, exposing port 80 → container port 8080.
 
-## ArgoCD Application Setup
+## Registering the ArgoCD Applications
 
-Example ArgoCD Application manifest for dev:
+The manifests in `argocd/` are reference copies. Apply them through the Harness GitOps agent, or
+directly against a cluster that has ArgoCD:
 
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: demo-app-dev
-  namespace: argocd
-spec:
-  project: default
-  source:
-    repoURL: <your-release-repo-url>
-    targetRevision: HEAD
-    path: dev
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: dev
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-    - CreateNamespace=true
+```bash
+kubectl apply -f argocd/demo-app-dev.yaml
+kubectl apply -f argocd/demo-app-prod.yaml
 ```
-
-## Image Tag Updates
-
-To deploy a new version, update the `image` field in the respective environment's `deployment.yaml`:
-
-```yaml
-image: demo-app:v1.2.3  # Update this tag
-```
-
-For automated updates via CI/CD, use tools like:
-- `yq` to update YAML in-place
-- `kustomize` with image overlays
-- ArgoCD Image Updater
-- Harness GitOps with automated image tag management
-
-## Health Checks
-
-All environments use the `/health` endpoint for:
-- **Liveness probe** - Restart unhealthy containers
-- **Readiness probe** - Remove unhealthy pods from service load balancing
-
-## Notes
-
-- All services use `ClusterIP` type (internal cluster access only)
-- Service exposes port 80, forwards to container port 8080
-- Spring profiles are set via `SPRING_PROFILES_ACTIVE` environment variable
-- Production includes JVM tuning via `JAVA_OPTS`
