@@ -37,7 +37,7 @@ Each ArgoCD `Application` in `argocd/` points at one env directory and syncs it 
 | `demo-app-prod` | `prod/` | `prod` | **Manual** — promotions go through the Harness CD pipeline |
 
 Dev auto-syncs on every commit. **Prod is deliberately manual** so a promotion is an explicit,
-approved, audited action driven by the `service-a-hotfix-cd` pipeline (see application-repo), not a
+approved, audited action driven by the `service-a-hotfix` pipeline (see application-repo), not a
 silent reaction to a commit.
 
 ## Environment differences
@@ -62,9 +62,10 @@ silent reaction to a commit.
 git commit -am "Deploy service-a <new-tag> to dev" && git push
 ```
 
-**Prod:** run the `service-a-hotfix-cd` pipeline. Its **Update Release Repo** step opens a PR
-bumping `prod/deployment.yaml`, **Merge PR** merges it, and **GitOps Sync** rolls prod — after the
-approval gate. See [application-repo](https://github.com/srumonke/application-repo) for the pipeline.
+**Prod:** run the `service-a-hotfix` pipeline. After the approval gate, its **Update Release Repo**
+step opens a PR bumping `prod/deployment.yaml` to the release tag, **Merge PR** merges it, and
+**GitOps Sync** rolls prod. See [application-repo](https://github.com/srumonke/application-repo) for
+the full pipeline (build → scan → deploy dev → approval → retag → deploy prod).
 
 ## Health checks
 
