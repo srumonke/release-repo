@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
       - name: demo-app
-        image: demo-app:latest
+        image: ghcr.io/srumonke/service-a:v4.1.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
@@ -47,12 +47,14 @@ spec:
           timeoutSeconds: 3
           failureThreshold: 3
         resources:
+          # NOTE: requests trimmed for the local kind cluster (fits alongside ArgoCD).
+          # Real prod would request ~1Gi/1000m per replica.
           requests:
+            memory: "256Mi"
+            cpu: "150m"
+          limits:
             memory: "1Gi"
             cpu: "1000m"
-          limits:
-            memory: "2Gi"
-            cpu: "2000m"
         env:
         - name: SPRING_PROFILES_ACTIVE
           value: "prod"
