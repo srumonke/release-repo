@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: demo-app
-        image: ghcr.io/srumonke/service-a:v4.1.0
+        image: ghcr.io/srumonke/service-a:4.1.1-RC1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
