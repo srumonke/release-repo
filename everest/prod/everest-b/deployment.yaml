@@ -1,0 +1,53 @@
+# Everest hotfix demo manifest.
+# Patched by GitOpsUpdateReleaseRepo at key spec.template.spec.containers[0].image
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: everest-b
+  namespace: prod
+  labels:
+    app: everest-b
+    environment: prod
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: everest-b
+  template:
+    metadata:
+      labels:
+        app: everest-b
+        environment: prod
+    spec:
+      containers:
+      - name: everest-b
+        image: pkg.harness.io/am8hcbditxgqnrtihnl7qq/sruthi-docker/everest-b:4.1.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod"
+        - name: SERVER_PORT
+          value: "8080"
