@@ -1,0 +1,90 @@
+# Everest hotfix demo services (project Sruthi, org default).
+#
+# TWO services is the minimum that makes the "all versions must be the same"
+# gate mean anything. Add everest-c the same way to grow the set.
+#
+# Create each with:
+#   harness_create(resource_type='service', org_id='default', project_id='Sruthi',
+#                  body={identifier:'everest_a', name:'everest-a', yaml:<the service block>})
+#
+# The flow is multi-service, so it needs one manifest file per service per
+# environment: `everest/<+env.name>/<+service.name>/deployment.yaml`. Everything the
+# demo owns lives under `everest/`, so it cannot collide with anything else in the repo.
+#
+# `gitopsAppPrefix` is what the pipeline's GitOpsSync step reads:
+#   applicationName: <+service.variables.gitopsAppPrefix>-<env>
+# so everest-a syncs everest-a-dev / everest-a-test / everest-a-prod.
+---
+service:
+  name: everest-a
+  identifier: everest_a
+  description: Everest hotfix demo service A, deployed via Harness GitOps to dev, test and prod
+  orgIdentifier: default
+  projectIdentifier: Sruthi
+  gitOpsEnabled: true
+  tags: {}
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: release_repo
+            type: ReleaseRepo
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github_srumonke
+                  repoName: release-repo
+                  gitFetchType: Branch
+                  branch: main
+                  # <+env.name> resolves per environment at stage runtime, so ONE
+                  # manifest covers dev, test and prod. Keep env name == directory name.
+                  paths:
+                    - everest/<+env.name>/<+service.name>/deployment.yaml
+      variables:
+        - name: gitopsAppPrefix
+          type: String
+          value: everest-a
+        - name: imageName
+          type: String
+          value: everest-a
+        - name: image
+          type: String
+          value: pkg.harness.io/am8hcbditxgqnrtihnl7qq/sruthi-docker/everest-a:4.1.2
+---
+service:
+  name: everest-b
+  identifier: everest_b
+  description: Everest hotfix demo service B, deployed via Harness GitOps to dev, test and prod
+  orgIdentifier: default
+  projectIdentifier: Sruthi
+  gitOpsEnabled: true
+  tags: {}
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: release_repo
+            type: ReleaseRepo
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: github_srumonke
+                  repoName: release-repo
+                  gitFetchType: Branch
+                  branch: main
+                  paths:
+                    - everest/<+env.name>/<+service.name>/deployment.yaml
+      variables:
+        - name: gitopsAppPrefix
+          type: String
+          value: everest-b
+        - name: imageName
+          type: String
+          value: everest-b
+        - name: image
+          type: String
+          value: pkg.harness.io/am8hcbditxgqnrtihnl7qq/sruthi-docker/everest-b:4.1.2

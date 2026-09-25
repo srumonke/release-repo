@@ -1,0 +1,151 @@
+# GitOps Applications for the Everest hotfix flow: 2 services x 3 environments = 6 apps.
+#
+# Create each with:
+#   harness_create(resource_type='gitops_application',
+#                  org_id='default', project_id='Sruthi',
+#                  params={agent_id:'sruthiagent',
+#                          cluster_identifier:'incluster',
+#                          repo_identifier:'releaserepo'},
+#                  body=<one entry below>)
+#
+# NAMING IS LOAD-BEARING: the pipeline's GitOpsSync step resolves
+#   applicationName: <+service.variables.gitopsAppPrefix>-<env>
+# so the names below must be exactly <gitopsAppPrefix>-dev / -test / -prod.
+#
+# LABELS are also load-bearing: without harness.io/serviceRef + harness.io/envRef,
+# GitOpsSync fails with "Application does not correspond to the service(s) selected".
+# Agent, cluster, repo and the referenced service/env are all PROJECT-scoped => no prefixes.
+#
+# SYNC POLICY: dev auto-syncs; test and prod are MANUAL so the pipeline's
+# UpdateReleaseRepo -> MergePR -> GitOpsSync sequence is what actually deploys them.
+# Do not add an `automated:` block to test or prod — ArgoCD would race the pipeline and the
+# gates would stop meaning anything.
+
+applications:
+  # ------------------------------------------------------------ everest-a
+  - application:
+      metadata:
+        name: everest-a-dev
+        labels:
+          harness.io/serviceRef: everest_a
+          harness.io/envRef: dev
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/dev/everest-a
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: dev
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true
+
+  - application:
+      metadata:
+        name: everest-a-test
+        labels:
+          harness.io/serviceRef: everest_a
+          harness.io/envRef: test
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/test/everest-a
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: test
+        syncPolicy:
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true
+
+  - application:
+      metadata:
+        name: everest-a-prod
+        labels:
+          harness.io/serviceRef: everest_a
+          harness.io/envRef: prod
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/prod/everest-a
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: prod
+        syncPolicy:
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true
+
+  # ------------------------------------------------------------ everest-b
+  - application:
+      metadata:
+        name: everest-b-dev
+        labels:
+          harness.io/serviceRef: everest_b
+          harness.io/envRef: dev
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/dev/everest-b
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: dev
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true
+
+  - application:
+      metadata:
+        name: everest-b-test
+        labels:
+          harness.io/serviceRef: everest_b
+          harness.io/envRef: test
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/test/everest-b
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: test
+        syncPolicy:
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true
+
+  - application:
+      metadata:
+        name: everest-b-prod
+        labels:
+          harness.io/serviceRef: everest_b
+          harness.io/envRef: prod
+      spec:
+        source:
+          repoURL: https://github.com/srumonke/release-repo
+          path: everest/prod/everest-b
+          targetRevision: main
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: prod
+        syncPolicy:
+          syncOptions:
+            - CreateNamespace=true
+            - PrunePropagationPolicy=foreground
+            - PruneLast=true

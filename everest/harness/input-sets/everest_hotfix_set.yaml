@@ -1,0 +1,77 @@
+# THE input set. This is the "Everest hotfix input set" from the diagram: it is the single
+# place the SERVICE NAMES live. The pipeline itself never hardcodes them.
+#
+# Create with:
+#   harness_create(resource_type='input_set', org_id='default', project_id='Sruthi',
+#                  params={pipeline_id:'everest_hotfix_deploy'}, body=<this yaml as a string>)
+#
+# Two independent places carry the list, and Stage 1 reconciles them:
+#   1. pipeline.variables.services / serviceVersions  -> what Stage 1 validates
+#   2. each deploy stage's services.values            -> what actually deploys
+# If someone adds a service to one and forgets the other, the Input Set Complete step and the
+# adjacency re-check are what catch it.
+#
+# deploymentTicket and hotfixVersion stay <+input> on purpose: they change every run, the
+# service list does not.
+inputSet:
+  name: Everest Hotfix Set
+  identifier: everest_hotfix_set
+  orgIdentifier: default
+  projectIdentifier: Sruthi
+  description: Service set for the Everest hotfix deploy flow. Ticket and version are per-run.
+  tags: {}
+  pipeline:
+    identifier: everest_hotfix_deploy
+    variables:
+      - name: jiraConnector
+        type: String
+        value: account.CCM_Jira
+      - name: jiraProject
+        type: String
+        value: CS
+      - name: deploymentTicket
+        type: String
+        value: <+input>
+      - name: hotfixVersion
+        type: String
+        value: <+input>
+      # ---- the service set ------------------------------------------------
+      - name: services
+        type: String
+        value: everest_a,everest_b
+      # Every service on the SAME released version, or Stage 1 refuses to run.
+      - name: serviceVersions
+        type: String
+        value: everest_a=4.1.3,everest_b=4.1.3
+      # ---------------------------------------------------------------------
+      - name: windowStartHour
+        type: String
+        value: "0"
+      - name: windowEndHour
+        type: String
+        value: "24"
+    stages:
+      - stage:
+          identifier: deploy_dev
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b
+      - stage:
+          identifier: deploy_test
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b
+      - stage:
+          identifier: deploy_prod
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b

@@ -1,0 +1,67 @@
+# The SAD-PATH input set. Identical to everest_hotfix_set except everest_b is one patch
+# behind. Run this first in the demo: Stage 1 fails at "Versions Are Aligned" and NOTHING is
+# written — no PR, no sync, no Jira transition. Then run the good set.
+#
+# Create with:
+#   harness_create(resource_type='input_set', org_id='default', project_id='Sruthi',
+#                  params={pipeline_id:'everest_hotfix_deploy'}, body=<this yaml as a string>)
+inputSet:
+  name: Everest Hotfix Set Misaligned
+  identifier: everest_hotfix_set_misaligned
+  orgIdentifier: default
+  projectIdentifier: Sruthi
+  description: Deliberately misaligned service set. Proves Stage 1 blocks before anything is written.
+  tags: {}
+  pipeline:
+    identifier: everest_hotfix_deploy
+    variables:
+      - name: jiraConnector
+        type: String
+        value: account.CCM_Jira
+      - name: jiraProject
+        type: String
+        value: CS
+      - name: deploymentTicket
+        type: String
+        value: <+input>
+      - name: hotfixVersion
+        type: String
+        value: <+input>
+      - name: services
+        type: String
+        value: everest_a,everest_b
+      # everest_b is on 4.1.2 while everest_a is on 4.1.3 -> Stage 1 aborts.
+      - name: serviceVersions
+        type: String
+        value: everest_a=4.1.3,everest_b=4.1.2
+      - name: windowStartHour
+        type: String
+        value: "0"
+      - name: windowEndHour
+        type: String
+        value: "24"
+    stages:
+      - stage:
+          identifier: deploy_dev
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b
+      - stage:
+          identifier: deploy_test
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b
+      - stage:
+          identifier: deploy_prod
+          type: Deployment
+          spec:
+            services:
+              values:
+                - serviceRef: everest_a
+                - serviceRef: everest_b

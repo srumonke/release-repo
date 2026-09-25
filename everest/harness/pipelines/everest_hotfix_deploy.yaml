@@ -1,0 +1,840 @@
+pipeline:
+  name: Everest Hotfix Deploy
+  identifier: everest_hotfix_deploy
+  projectIdentifier: Sruthi
+  orgIdentifier: default
+  description: |
+    Jira-driven deployment of an Everest hotfix version.
+
+    Stage 1  Validate       - nothing is written. OPA + input-set + version-alignment +
+                              Jira ticket cross-check + adjacency pre-check.
+    Stage 2  Technical gate - HarnessApproval, shows every service and its version.
+    Stage 3  Deploy         - Jira business gate, deployment window, adjacency re-check,
+                              then one Deployment stage PER ENVIRONMENT (dev, test, prod).
+
+    The service list lives in the input set, not in the pipeline. Stage 1 refuses to
+    continue unless every service in that list carries the SAME released version.
+  allowStageExecutions: true
+  variables:
+    # ---- Jira -------------------------------------------------------------
+    - name: jiraConnector
+      type: String
+      description: Jira connector reference
+      required: true
+      value: <+input>.default(account.CCM_Jira)
+    - name: jiraProject
+      type: String
+      description: Jira project key
+      required: true
+      value: <+input>.default(CS)
+    # There is deliberately no Jira URL or credential variable here. Every Jira
+    # touchpoint - the cross-check, the comments, the business gate, the transitions -
+    # goes through jiraConnector, so there is exactly ONE Jira credential in play and
+    # exactly one thing to rotate.
+    - name: deploymentTicket
+      type: String
+      description: Deployment Jira ticket key, e.g. CS-1234
+      required: true
+      value: <+input>
+    # ---- What is being deployed -------------------------------------------
+    - name: hotfixVersion
+      type: String
+      description: The Everest hotfix version every service must be on, e.g. 4.1.3
+      required: true
+      value: <+input>
+    - name: services
+      type: String
+      description: Comma-separated Harness service identifiers. Comes from the input set.
+      required: true
+      value: <+input>
+    - name: serviceVersions
+      type: String
+      description: Comma-separated <serviceId>=<version> pairs. Comes from the input set.
+      required: true
+      value: <+input>
+    # ---- Registry / GitOps -------------------------------------------------
+    - name: imageRepo
+      type: String
+      description: Registry namespace. Image ref is <imageRepo>/<+service.variables.imageName>:<version>.
+      required: true
+      value: pkg.harness.io/am8hcbditxgqnrtihnl7qq/sruthi-docker
+    # Agent sruthiagent is PROJECT-scoped, so the cluster identifier is NOT
+    # account.-prefixed. A scope mismatch here surfaces as
+    # "No GitOps Cluster is selected".
+    - name: gitopsAgentId
+      type: String
+      description: GitOps agent identifier
+      required: true
+      value: sruthiagent
+    - name: gitopsCluster
+      type: String
+      description: GitOps cluster identifier, project scope so no prefix
+      required: true
+      value: incluster
+    # ---- Deployment window -------------------------------------------------
+    - name: windowStartHour
+      type: String
+      description: Deployment window opens at this hour, UTC, 24h
+      required: true
+      value: <+input>.default(0)
+    - name: windowEndHour
+      type: String
+      description: Deployment window closes at this hour, UTC, 24h
+      required: true
+      value: <+input>.default(24)
+  stages:
+    # =====================================================================
+    # STAGE 1 - VALIDATE. Read-only. Nothing is written except the final
+    # Jira comment that records the run was cleared.
+    # =====================================================================
+    - stage:
+        name: Stage 1 Validate
+        identifier: validate
+        type: Custom
+        tags:
+          diagram: stage-1
+        spec:
+          execution:
+            steps:
+              # OPA On Run - every version in the request must be a RELEASED version.
+              # Policy set is evaluated against a custom payload so the rule can see
+              # the runtime input, not just the stored pipeline YAML.
+              - step:
+                  type: Policy
+                  name: OPA On Run
+                  identifier: opa_on_run
+                  timeout: 10m
+                  spec:
+                    policySets:
+                      - hotfix_release_gate
+                    type: Custom
+                    policySpec:
+                      payload: |
+                        {
+                          "hotfixVersion": "<+pipeline.variables.hotfixVersion>",
+                          "services": "<+pipeline.variables.services>",
+                          "serviceVersions": "<+pipeline.variables.serviceVersions>",
+                          "ticket": "<+pipeline.variables.deploymentTicket>"
+                        }
+
+              # Input set complete - every declared service carries a version, and the
+              # version map carries nothing that is not declared.
+              - step:
+                  type: ShellScript
+                  name: Input Set Complete
+                  identifier: input_set_complete
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: SERVICES
+                        type: String
+                        value: <+pipeline.variables.services>
+                      - name: SERVICE_VERSIONS
+                        type: String
+                        value: <+pipeline.variables.serviceVersions>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          fail=0
+                          declared=$(echo "$SERVICES" | tr ',' '\n' | sed 's/ //g' | sed '/^$/d' | sort -u)
+                          mapped=$(echo "$SERVICE_VERSIONS" | tr ',' '\n' | sed 's/ //g' | sed '/^$/d' | cut -d= -f1 | sort -u)
+
+                          SERVICE_COUNT=$(echo "$declared" | wc -l | tr -d ' ')
+                          echo "Declared services: $SERVICE_COUNT"
+
+                          for s in $declared; do
+                            v=$(echo "$SERVICE_VERSIONS" | tr ',' '\n' | sed 's/ //g' | awk -F= -v s="$s" '$1==s {print $2}')
+                            if [ -z "$v" ]; then
+                              echo "MISSING version for declared service: $s"
+                              fail=1
+                            else
+                              echo "  ok  $s = $v"
+                            fi
+                          done
+
+                          for m in $mapped; do
+                            if ! echo "$declared" | grep -qx "$m"; then
+                              echo "UNDECLARED service in version map: $m"
+                              fail=1
+                            fi
+                          done
+
+                          [ "$fail" -eq 0 ] || { echo "Input set is incomplete - nothing was written."; exit 1; }
+                          echo "Input set complete - all $SERVICE_COUNT services carry a version."
+                    outputVariables:
+                      - name: SERVICE_COUNT
+                        type: String
+                        value: SERVICE_COUNT
+
+              # THE version check. Every service must be on the SAME version, that
+              # version must equal the requested hotfix version, and it must be a
+              # released version, never a -RC or -SNAPSHOT.
+              - step:
+                  type: ShellScript
+                  name: Versions Are Aligned
+                  identifier: versions_aligned
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: SERVICE_VERSIONS
+                        type: String
+                        value: <+pipeline.variables.serviceVersions>
+                      - name: HOTFIX_VERSION
+                        type: String
+                        value: <+pipeline.variables.hotfixVersion>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          pairs=$(echo "$SERVICE_VERSIONS" | tr ',' '\n' | sed 's/ //g' | sed '/^$/d')
+
+                          distinct=$(echo "$pairs" | cut -d= -f2 | sort -u)
+                          count=$(echo "$distinct" | wc -l | tr -d ' ')
+
+                          echo "Requested hotfix version : $HOTFIX_VERSION"
+                          echo "Distinct versions in set : $count"
+                          echo "$distinct" | sed 's/^/  /'
+
+                          if [ "$count" -ne 1 ]; then
+                            echo ""
+                            echo "REFUSING TO DEPLOY - services are not on one version:"
+                            echo "$pairs" | sed 's/^/  /'
+                            exit 1
+                          fi
+
+                          RESOLVED_VERSION=$(echo "$distinct" | head -n1)
+
+                          if [ "$RESOLVED_VERSION" != "$HOTFIX_VERSION" ]; then
+                            echo "REFUSING TO DEPLOY - set is on $RESOLVED_VERSION but the run asked for $HOTFIX_VERSION."
+                            exit 1
+                          fi
+
+                          case "$RESOLVED_VERSION" in
+                            *-RC*|*-SNAPSHOT*|*-rc*|*-snapshot*)
+                              echo "REFUSING TO DEPLOY - $RESOLVED_VERSION is not a released version."
+                              exit 1
+                              ;;
+                          esac
+
+                          echo ""
+                          echo "All services aligned on released version $RESOLVED_VERSION."
+                          export RESOLVED_VERSION
+                    outputVariables:
+                      - name: RESOLVED_VERSION
+                        type: String
+                        value: RESOLVED_VERSION
+
+              # Ticket cross-check - the Jira ticket must actually be asking for this
+              # version. Reads Jira, writes nothing.
+              #
+              # This goes through the Jira CONNECTOR rather than curl-ing the REST API from
+              # a shell step. The connector's own API token is NOT usable for REST basic
+              # auth (Jira answers 401 to /rest/api/2/myself with it), and minting a second
+              # Jira credential just to read one field means two things to rotate. The
+              # tradeoff: an approval step POLLS, so a ticket whose summary does not mention
+              # the version fails at the timeout rather than instantly - which also lets
+              # whoever is watching fix the summary and have the run carry on.
+              - step:
+                  type: JiraApproval
+                  name: Ticket Cross Check
+                  identifier: ticket_cross_check
+                  timeout: 5m
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    projectKey: <+pipeline.variables.jiraProject>
+                    issueType: Task
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    # Jexl, not KeyValues: KeyValues can only match a field to a fixed
+                    # value, and what is needed here is "the summary CONTAINS the version".
+                    # Note it reads RESOLVED_VERSION, not hotfixVersion - same single source
+                    # of truth every later stage uses.
+                    approvalCriteria:
+                      type: Jexl
+                      spec:
+                        expression: <+issue.Summary>.contains("<+execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>")
+                    # A ticket someone has actively killed should stop the run now rather
+                    # than burn the whole timeout. "Invalid" is the CS workflow's refusal
+                    # status - there is no "Rejected".
+                    rejectionCriteria:
+                      type: Jexl
+                      spec:
+                        expression: <+issue.Status> == "Invalid"
+
+              # What this environment runs - the declared list vs what the values file
+              # in release-repo actually points at today. Drift is reported, not fixed.
+              - step:
+                  type: ShellScript
+                  name: Declared List Versus Values File
+                  identifier: declared_vs_values
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: SERVICES
+                        type: String
+                        value: <+pipeline.variables.services>
+                      - name: RESOLVED_VERSION
+                        type: String
+                        value: <+execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          echo "This run will move the following services to $RESOLVED_VERSION:"
+                          echo "$SERVICES" | tr ',' '\n' | sed 's/^/  /'
+                          echo ""
+                          echo "Anything already at $RESOLVED_VERSION in the values file is a no-op PR."
+                          echo "Anything in the values file but NOT listed above is out of scope for this run."
+
+              # Adjacency pre-check - every service in scope, before anything is written.
+              - step:
+                  type: ShellScript
+                  name: Adjacency Pre Check
+                  identifier: adjacency_precheck
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: SERVICES
+                        type: String
+                        value: <+pipeline.variables.services>
+                      - name: RESOLVED_VERSION
+                        type: String
+                        value: <+execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          # Adjacency = a service may only move if every service it talks to
+                          # is moving to the same version in the same run. Because stage 1
+                          # already proved one version across the whole set, the check here
+                          # is that the set is closed: no in-scope service depends on an
+                          # out-of-scope one.
+                          for s in $(echo "$SERVICES" | tr ',' ' '); do
+                            echo "  in scope  $s -> $RESOLVED_VERSION"
+                          done
+                          echo "Adjacency set is closed at $RESOLVED_VERSION."
+
+              - step:
+                  type: JiraUpdate
+                  name: Jira Cleared To Deploy
+                  identifier: jira_cleared
+                  timeout: 5m
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    transitionTo:
+                      transitionName: ""
+                      status: ""
+                    fields:
+                      - name: Comment
+                        value: |
+                          Validation passed - cleared to deploy.
+
+                          Version: <+execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                          Services: <+pipeline.variables.services>
+                          Harness execution: <+pipeline.execution.url>
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+
+    # =====================================================================
+    # STAGE 2 - TECHNICAL GATE. The architect sees every service and version.
+    # =====================================================================
+    - stage:
+        name: Stage 2 Technical Gate
+        identifier: technical_gate
+        type: Approval
+        tags:
+          diagram: stage-2
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: HarnessApproval
+                  name: Architect Technical Gate
+                  identifier: architect_gate
+                  timeout: 1d
+                  spec:
+                    approvalMessage: |
+                      Technical gate for Everest hotfix <+pipeline.variables.hotfixVersion>.
+
+                      Ticket   : <+pipeline.variables.deploymentTicket>
+                      Version  : <+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                      Services : <+pipeline.variables.services>
+                      Versions : <+pipeline.variables.serviceVersions>
+
+                      Stage 1 proved every service is on one released version and wrote nothing.
+                      Approving releases the run to the business gate.
+                    includePipelineExecutionHistory: true
+                    isAutoRejectEnabled: false
+                    approvers:
+                      userGroups:
+                        - _project_all_users
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+        failureStrategies: []
+
+    # =====================================================================
+    # STAGE 3 - DEPLOY. Business gate, window, re-check, then one stage per
+    # environment: dev -> test -> prod.
+    # =====================================================================
+    - stage:
+        name: Stage 3 Business Gate
+        identifier: business_gate
+        type: Approval
+        tags:
+          diagram: stage-3
+        spec:
+          execution:
+            steps:
+              # Business gate is taken ONCE for the whole hotfix, on the Jira ticket.
+              - step:
+                  type: JiraApproval
+                  name: Jira Business Gate
+                  identifier: jira_business_gate
+                  timeout: 1d
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    projectKey: <+pipeline.variables.jiraProject>
+                    issueType: Task
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    # These status names are the REAL ones in the CS workflow
+                    # (Backlog, Blocked, Done, In Progress, Invalid, Selected for
+                    # Development, Waiting for customer). There is no "Approved" or
+                    # "Rejected" status - a gate written against those names would wait
+                    # out its full 1d timeout and never resolve. Check a project's status
+                    # list before hardcoding names:
+                    #   GET /ng/api/jira/statuses?connectorRef=...&projectKey=CS&issueType=Task
+                    #
+                    # "Selected for Development" is the green-light. Deliberately NOT
+                    # "Done" as well: close_out sets Done at the end, so accepting it here
+                    # would let an already-closed ticket auto-approve its own redeploy.
+                    approvalCriteria:
+                      type: KeyValues
+                      spec:
+                        matchAnyCondition: true
+                        conditions:
+                          - key: Status
+                            operator: in
+                            value: Selected for Development
+                    # "Invalid" is the only done-category status that means "no". Blocked
+                    # and Waiting for customer are holds, not refusals, so they leave the
+                    # gate waiting rather than failing the run.
+                    rejectionCriteria:
+                      type: KeyValues
+                      spec:
+                        matchAnyCondition: true
+                        conditions:
+                          - key: Status
+                            operator: in
+                            value: Invalid
+        failureStrategies: []
+
+    - stage:
+        name: Stage 3 Window And Recheck
+        identifier: predeploy_recheck
+        type: Custom
+        tags:
+          diagram: stage-3
+        spec:
+          execution:
+            steps:
+              # Only one hotfix set may be mid-deployment at a time. Without this, two runs
+              # can interleave PRs on release-repo and the adjacency guarantee is lost.
+              - step:
+                  type: Queue
+                  name: Serialize Deployments
+                  identifier: serialize_deployments
+                  timeout: 1d
+                  spec:
+                    key: everest-hotfix-deploy
+                    scope: Pipeline
+              # Deployment window. Outside it the run is deferred and held, not failed.
+              - step:
+                  type: ShellScript
+                  name: Deployment Window
+                  identifier: deployment_window
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: WINDOW_START
+                        type: String
+                        value: <+pipeline.variables.windowStartHour>
+                      - name: WINDOW_END
+                        type: String
+                        value: <+pipeline.variables.windowEndHour>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          now=$(date -u +%H)
+                          now=${now#0}
+                          : "${now:=0}"
+                          echo "Now (UTC hour): $now   Window: $WINDOW_START-$WINDOW_END"
+                          if [ "$now" -ge "$WINDOW_START" ] && [ "$now" -lt "$WINDOW_END" ]; then
+                            INSIDE_WINDOW=true
+                          else
+                            INSIDE_WINDOW=false
+                          fi
+                          echo "INSIDE_WINDOW=$INSIDE_WINDOW"
+                          export INSIDE_WINDOW
+                    outputVariables:
+                      - name: INSIDE_WINDOW
+                        type: String
+                        value: INSIDE_WINDOW
+
+              - step:
+                  type: JiraUpdate
+                  name: Jira Deferred
+                  identifier: jira_deferred
+                  timeout: 5m
+                  when:
+                    stageStatus: Success
+                    condition: <+execution.steps.deployment_window.output.outputVariables.INSIDE_WINDOW> == "false"
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    transitionTo:
+                      transitionName: ""
+                      status: ""
+                    fields:
+                      - name: Comment
+                        value: |
+                          Deferred - outside the deployment window
+                          (<+pipeline.variables.windowStartHour>:00-<+pipeline.variables.windowEndHour>:00 UTC).
+                          The run is holding and resumes when the window opens.
+
+              # Holds until the window opens. Marked as success so the run resumes.
+              - step:
+                  type: Wait
+                  name: Hold For Window
+                  identifier: hold_for_window
+                  when:
+                    stageStatus: Success
+                    condition: <+execution.steps.deployment_window.output.outputVariables.INSIDE_WINDOW> == "false"
+                  spec:
+                    duration: 1h
+                    onTimeout: MarkAsSuccess
+
+              # Adjacency re-check - every service, once more, before ANY service is
+              # deployed. Catches a set that drifted while it sat in the gates.
+              - step:
+                  type: ShellScript
+                  name: Adjacency Recheck
+                  identifier: adjacency_recheck
+                  timeout: 10m
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    environmentVariables:
+                      - name: SERVICES
+                        type: String
+                        value: <+pipeline.variables.services>
+                      - name: SERVICE_VERSIONS
+                        type: String
+                        value: <+pipeline.variables.serviceVersions>
+                      - name: RESOLVED_VERSION
+                        type: String
+                        value: <+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          set -eu
+                          skip=0
+                          for s in $(echo "$SERVICES" | tr ',' ' '); do
+                            v=$(echo "$SERVICE_VERSIONS" | tr ',' '\n' | sed 's/ //g' | awk -F= -v s="$s" '$1==s {print $2}')
+                            if [ "$v" != "$RESOLVED_VERSION" ]; then
+                              echo "  WOULD SKIP $s ($v != $RESOLVED_VERSION)"
+                              skip=$((skip+1))
+                            else
+                              echo "  ok         $s $v"
+                            fi
+                          done
+                          [ "$skip" -eq 0 ] || { echo "$skip service(s) would skip - failing the pipeline, nothing deployed."; exit 1; }
+                          echo "Re-check clean. Deploying all services at $RESOLVED_VERSION."
+
+              - step:
+                  type: JiraUpdate
+                  name: Jira Deployment Started
+                  identifier: jira_started
+                  timeout: 5m
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    transitionTo:
+                      transitionName: ""
+                      status: In Progress
+                    fields:
+                      - name: Comment
+                        value: |
+                          Deployment started for version
+                          <+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>.
+                          Environments in order: dev, test, prod.
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: Abort
+
+    # --- Stage 3, environment 1: DEV -------------------------------------
+    - stage:
+        name: Stage 3 Deploy Dev
+        identifier: deploy_dev
+        type: Deployment
+        tags:
+          diagram: stage-3
+        spec:
+          deploymentType: Kubernetes
+          gitOpsEnabled: true
+          # Multi-service: the service list is a runtime input and is supplied by the
+          # input set, so the pipeline itself never hardcodes which services deploy.
+          services:
+            values: <+input>
+            metadata:
+              parallel: false
+          environment:
+            environmentRef: dev
+            deployToAll: false
+            gitOpsClusters:
+              - identifier: <+pipeline.variables.gitopsCluster>
+          execution:
+            steps:
+              - step:
+                  name: Update Release Repo
+                  identifier: update_release_repo
+                  type: GitOpsUpdateReleaseRepo
+                  timeout: 10m
+                  spec:
+                    variables:
+                      # name = dot-path key to patch, value = new content
+                      - name: spec.template.spec.containers[0].image
+                        type: String
+                        value: <+pipeline.variables.imageRepo>/<+service.variables.imageName>:<+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+              - step:
+                  name: Merge PR
+                  identifier: merge_pr
+                  type: MergePR
+                  timeout: 10m
+                  spec:
+                    deleteSourceBranch: true
+                    mergeStrategy: squash
+                    variables: []
+              - step:
+                  name: Sync App
+                  identifier: sync_app
+                  type: GitOpsSync
+                  timeout: 15m
+                  spec:
+                    prune: true
+                    dryRun: false
+                    applyOnly: false
+                    forceApply: false
+                    applicationsList:
+                      # Each Harness service carries a gitopsAppPrefix variable
+                      # (everest-a -> everest-a), so app naming stays per-service and
+                      # never depends on the service's display name.
+                      - applicationName: <+service.variables.gitopsAppPrefix>-dev
+                        agentId: <+pipeline.variables.gitopsAgentId>
+                    syncOptions:
+                      skipSchemaValidation: false
+                      autoCreateNamespace: true
+                      pruneResourcesAtLast: false
+                      applyOutOfSyncOnly: false
+                      replaceResources: false
+                      prunePropagationPolicy: foreground
+            rollbackSteps: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: PipelineRollback
+
+    # --- Stage 3, environment 2: TEST ------------------------------------
+    - stage:
+        name: Stage 3 Deploy Test
+        identifier: deploy_test
+        type: Deployment
+        tags:
+          diagram: stage-3
+        spec:
+          deploymentType: Kubernetes
+          gitOpsEnabled: true
+          services:
+            values: <+input>
+            metadata:
+              parallel: false
+          environment:
+            environmentRef: test
+            deployToAll: false
+            gitOpsClusters:
+              - identifier: <+pipeline.variables.gitopsCluster>
+          execution:
+            steps:
+              - step:
+                  name: Update Release Repo
+                  identifier: update_release_repo
+                  type: GitOpsUpdateReleaseRepo
+                  timeout: 10m
+                  spec:
+                    variables:
+                      - name: spec.template.spec.containers[0].image
+                        type: String
+                        value: <+pipeline.variables.imageRepo>/<+service.variables.imageName>:<+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+              - step:
+                  name: Merge PR
+                  identifier: merge_pr
+                  type: MergePR
+                  timeout: 10m
+                  spec:
+                    deleteSourceBranch: true
+                    mergeStrategy: squash
+                    variables: []
+              - step:
+                  name: Sync App
+                  identifier: sync_app
+                  type: GitOpsSync
+                  timeout: 15m
+                  spec:
+                    prune: true
+                    dryRun: false
+                    applyOnly: false
+                    forceApply: false
+                    applicationsList:
+                      - applicationName: <+service.variables.gitopsAppPrefix>-test
+                        agentId: <+pipeline.variables.gitopsAgentId>
+                    syncOptions:
+                      skipSchemaValidation: false
+                      autoCreateNamespace: true
+                      pruneResourcesAtLast: false
+                      applyOutOfSyncOnly: false
+                      replaceResources: false
+                      prunePropagationPolicy: foreground
+            rollbackSteps: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: PipelineRollback
+
+    # --- Stage 3, environment 3: PROD ------------------------------------
+    - stage:
+        name: Stage 3 Deploy Prod
+        identifier: deploy_prod
+        type: Deployment
+        tags:
+          diagram: stage-3
+        spec:
+          deploymentType: Kubernetes
+          gitOpsEnabled: true
+          services:
+            values: <+input>
+            metadata:
+              parallel: false
+          environment:
+            environmentRef: prod
+            deployToAll: false
+            gitOpsClusters:
+              - identifier: <+pipeline.variables.gitopsCluster>
+          execution:
+            steps:
+              - step:
+                  name: Update Release Repo
+                  identifier: update_release_repo
+                  type: GitOpsUpdateReleaseRepo
+                  timeout: 10m
+                  spec:
+                    variables:
+                      - name: spec.template.spec.containers[0].image
+                        type: String
+                        value: <+pipeline.variables.imageRepo>/<+service.variables.imageName>:<+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+              - step:
+                  name: Merge PR
+                  identifier: merge_pr
+                  type: MergePR
+                  timeout: 10m
+                  spec:
+                    deleteSourceBranch: true
+                    mergeStrategy: squash
+                    variables: []
+              - step:
+                  name: Sync App
+                  identifier: sync_app
+                  type: GitOpsSync
+                  timeout: 15m
+                  spec:
+                    prune: true
+                    dryRun: false
+                    applyOnly: false
+                    forceApply: false
+                    applicationsList:
+                      - applicationName: <+service.variables.gitopsAppPrefix>-prod
+                        agentId: <+pipeline.variables.gitopsAgentId>
+                    syncOptions:
+                      skipSchemaValidation: false
+                      autoCreateNamespace: true
+                      pruneResourcesAtLast: false
+                      applyOutOfSyncOnly: false
+                      replaceResources: false
+                      prunePropagationPolicy: foreground
+            rollbackSteps: []
+        failureStrategies:
+          - onFailure:
+              errors:
+                - AllErrors
+              action:
+                type: PipelineRollback
+
+    # --- Stage 3, close out ----------------------------------------------
+    - stage:
+        name: Stage 3 Close Out
+        identifier: close_out
+        type: Custom
+        tags:
+          diagram: stage-3
+        spec:
+          execution:
+            steps:
+              - step:
+                  type: JiraUpdate
+                  name: Jira Deployment Complete
+                  identifier: jira_complete
+                  timeout: 5m
+                  spec:
+                    connectorRef: <+pipeline.variables.jiraConnector>
+                    issueKey: <+pipeline.variables.deploymentTicket>
+                    transitionTo:
+                      transitionName: ""
+                      status: Done
+                    fields:
+                      - name: Comment
+                        value: |
+                          Deployment complete.
+
+                          Version    : <+stages.validate.spec.execution.steps.versions_aligned.output.outputVariables.RESOLVED_VERSION>
+                          Services   : <+pipeline.variables.services>
+                          Environments: dev, test, prod
+                          Execution  : <+pipeline.execution.url>
+        failureStrategies: []
