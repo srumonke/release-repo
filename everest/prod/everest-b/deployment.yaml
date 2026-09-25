@@ -27,18 +27,26 @@ spec:
         - containerPort: 8080
           name: http
           protocol: TCP
+        # Spring Boot needs ~40s to come up under these CPU limits. The startupProbe owns
+        # the boot window (36 x 5s = 3 min); liveness only takes over once it passes, so a
+        # slow start can never be mistaken for a hung container.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 36
         readinessProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 10
           periodSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 30
           periodSeconds: 10
+          failureThreshold: 3
         resources:
           requests:
             memory: "256Mi"
