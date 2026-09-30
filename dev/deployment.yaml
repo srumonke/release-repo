@@ -43,13 +43,20 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "250m"
+            memory: 256Mi
+            cpu: 250m
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: 512Mi
+            cpu: 500m
         env:
         - name: SPRING_PROFILES_ACTIVE
-          value: "dev"
+          value: dev
         - name: SERVER_PORT
-          value: "8080"
+          value: '8080'
+a: '4'
+this:
+  key:
+    does:
+      not:
+        exist:
+          version: 9.9.9
